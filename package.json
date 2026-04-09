@@ -1,0 +1,11 @@
+{
+  "name": "norbot",
+  "version": "1.0.0",
+  "description": "AI-drevet handelsanalyseplattform",
+  "scripts": {
+    "start": "npx serve . -l $PORT"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
