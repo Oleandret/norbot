@@ -990,6 +990,8 @@ input[type=range]{accent-color:var(--g500);width:100%}.rl{display:flex;justify-c
 <div id="page-settings" class="page">
   <div class="ph"><div><h1>Innstillinger</h1><p>API-nøkler, modeller, analyse og kunnskapsbase</p></div></div>
   <div class="pb" style="max-width:660px"><div class="sy">
+    <!-- Railway server-status (skjult i lokal-modus, vises automatisk på server) -->
+    <div id="server-status-panel" class="card cb" style="display:none;border-color:var(--b700)"></div>
     <div class="card cb"><div class="sh"><svg style="color:var(--b600)" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z"/></svg>Brukerprofil</div>
       <div><label class="lbl">Profilnavn</label><input type="text" id="cfg-username" class="f" placeholder="Ditt navn eller kallenavn" oninput="updateUserDisplay()"><p class="hint">Brukes lokalt for å identifisere profilen din</p></div>
     </div>
@@ -1222,6 +1224,9 @@ let multiModelResults = [];
 let pendingTrade = null;
 let oandaConnected = false;
 let binanceConnected = false;
+
+// Kjøres på server (Railway/http) eller lokalt (file://)?
+const IS_SERVER = location.protocol === 'http:' || location.protocol === 'https:';
 let krakenConnected = false;
 
 /* ── STORAGE ─────────────────────────────────────── */
@@ -1265,9 +1270,11 @@ function init(){
 function boot(){
   updateUserDisplay();
   renderForm();
-  // Show no-key warning if no API key configured
+  // Hent server-status hvis vi kjører på Railway
+  if(IS_SERVER) fetchServerStatus();
+  // Show no-key warning only in local mode
   const nokey = S('nokeymsg');
-  if(nokey) nokey.classList.toggle('hidden', !!(cfg.apiKey||cfg.anthropicKey));
+  if(nokey) nokey.classList.toggle('hidden', IS_SERVER || !!(cfg.apiKey||cfg.anthropicKey));
   updateKBStatus();
   updateLiveBanner();
   updateLiveBadge();
@@ -1725,6 +1732,22 @@ function exportCostLog(){
 
 async function callAIWithProvider(provider, model, apiKey, messages, sysPrompt){
   const ct = _callType || 'Analyse';
+
+  // ── SERVER-MODUS: bruk Railway-backend (ingen CORS-problemer, nøkler på server) ──
+  if(IS_SERVER){
+    const allMsgs = [{role:'system',content:sysPrompt}, ...messages.filter(m=>m.role!=='system')];
+    const r = await fetch('/api/ai',{
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ provider, model, messages: allMsgs, maxTokens: depthTokens(), temperature: cfg.temp||0.7 })
+    });
+    const d = await r.json();
+    if(!r.ok) throw new Error(d.error || `Serverfeil ${r.status}`);
+    logTokenUse(model||'gpt-4o', ct, d.usage?.prompt_tokens||d.usage?.input_tokens||0, d.usage?.completion_tokens||d.usage?.output_tokens||0);
+    return d.text || '';
+  }
+
+  // ── LOKAL-MODUS (file://): direkte API-kall med nøkler fra innstillinger ──
   if(provider==='anthropic'){
     const key = apiKey || cfg.anthropicKey;
     if(!key) throw new Error('Mangler Anthropic API-nøkkel');
@@ -1753,7 +1776,6 @@ async function callAIWithProvider(provider, model, apiKey, messages, sysPrompt){
     if(!key) throw new Error('Mangler xAI Grok API-nøkkel (xai-...)');
     const msgs = [{role:'system',content:sysPrompt},...messages.filter(m=>m.role!=='system')];
     const body = { model: model||'grok-3-beta', messages: msgs, max_tokens: depthTokens(), temperature: cfg.temp||0.7 };
-    // xAI Grok bruker standard max_tokens (ikke o-serie format)
     const r = await fetch('https://api.x.ai/v1/chat/completions',{
       method:'POST',
       headers:{'Content-Type':'application/json','Authorization':'Bearer '+key},
@@ -2996,6 +3018,46 @@ function setVal(id,val,type){
 function getVal(id){ const el=S(id); return el?el.value:''; }
 function getChk(id){ const el=S(id); return el?el.checked:false; }
 
+/* ── SERVER STATUS (Railway-modus) ──────────────── */
+async function fetchServerStatus(){
+  try {
+    const r = await fetch('/api/status');
+    if(!r.ok) return;
+    const s = await r.json();
+    renderServerStatus(s);
+    // Skjul API-nøkkeladvarselen — nøkler er på serveren
+    const nokey = S('nokeymsg');
+    if(nokey) nokey.classList.add('hidden');
+  } catch(e) { /* ikke server-modus */ }
+}
+
+function renderServerStatus(s){
+  const el = S('server-status-panel');
+  if(!el) return;
+  el.style.display = 'block';
+
+  const ok  = v => v ? '<span style="color:var(--g400)">✅ Konfigurert</span>' : '<span style="color:var(--r400)">❌ Mangler</span>';
+  el.innerHTML = `
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px">
+      <div style="width:36px;height:36px;border-radius:9px;background:linear-gradient(135deg,#0891b2,#0e7490);display:flex;align-items:center;justify-content:center;font-size:18px;flex-shrink:0">🚂</div>
+      <div><div style="font-size:14px;font-weight:700;color:var(--c100)">Railway Server-modus</div>
+      <div style="font-size:11px;color:var(--c500)">Nøkler settes som miljøvariabler på Railway — ikke lagret i nettleseren</div></div>
+    </div>
+    <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px">
+      ${[['OpenAI','OPENAI_API_KEY',s.openai],['Anthropic','ANTHROPIC_API_KEY',s.anthropic],['Grok','GROK_API_KEY',s.grok],
+         ['Kraken','KRAKEN_API_KEY + KRAKEN_SECRET',s.kraken],['Binance','BINANCE_API_KEY + BINANCE_SECRET',s.binance],['OANDA','OANDA_API_KEY',s.oanda]]
+        .map(([name,varName,configured])=>`
+        <div style="background:var(--c900);border:1px solid var(--c800);border-radius:8px;padding:10px">
+          <div style="font-size:12px;font-weight:700;color:var(--c200);margin-bottom:4px">${name}</div>
+          <div style="font-size:10px;color:var(--c600);margin-bottom:6px">${varName}</div>
+          <div style="font-size:11px">${ok(configured)}</div>
+        </div>`).join('')}
+    </div>
+    <div style="margin-top:10px;font-size:11px;color:var(--c500)">
+      Legg til eller endre nøkler: Railway Dashboard → ditt prosjekt → <strong style="color:var(--c300)">Variables</strong>
+    </div>`;
+}
+
 /* ── BOOT ────────────────────────────────────────── */
 
 function saveOanda(){
@@ -3018,30 +3080,36 @@ function toKrakenPair(sym){
 }
 
 async function placeKrakenOrder(sym, direction, volume){
-  const proxy = (cfg.krakenProxy||'').replace(/\/$/, '');
-  if(!proxy) throw new Error('Kraken proxy-URL mangler — fyll inn i innstillinger');
-  if(!cfg.krakenApiKey || !cfg.krakenSecret) throw new Error('Mangler Kraken API-nøkkel eller privatnøkkel');
+  const pair = toKrakenPair(sym);
+  const type = direction === 'KJØP' ? 'buy' : 'sell';
+  let d;
 
-  const pair     = toKrakenPair(sym);
-  const type     = direction === 'KJØP' ? 'buy' : 'sell';
-  const nonce    = Date.now().toString();
-  const urlPath  = '/0/private/AddOrder';
-  const postData = `nonce=${nonce}&pair=${pair}&type=${type}&ordertype=market&volume=${volume}`;
+  if(IS_SERVER){
+    // Server-modus: ingen CORS, ingen proxy
+    const r = await fetch('/api/kraken/order', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ pair, type, ordertype:'market', volume })
+    });
+    d = await r.json();
+  } else {
+    // Lokal-modus: proxy
+    const proxy = (cfg.krakenProxy||'').replace(/\/$/, '');
+    if(!proxy) throw new Error('Kraken proxy-URL mangler — fyll inn i innstillinger');
+    if(!cfg.krakenApiKey || !cfg.krakenSecret) throw new Error('Mangler Kraken-nøkler');
+    const nonce    = Date.now().toString();
+    const urlPath  = '/0/private/AddOrder';
+    const postData = `nonce=${nonce}&pair=${pair}&type=${type}&ordertype=market&volume=${volume}`;
+    const sig = await krakenSign(urlPath, postData, cfg.krakenSecret);
+    const r = await fetch(proxy + urlPath, {
+      method:'POST',
+      headers:{'API-Key':cfg.krakenApiKey,'API-Sign':sig,'Content-Type':'application/x-www-form-urlencoded'},
+      body: postData
+    });
+    if(!r.ok) throw new Error(`HTTP ${r.status}`);
+    d = await r.json();
+  }
 
-  const sig = await krakenSign(urlPath, postData, cfg.krakenSecret);
-
-  const r = await fetch(proxy + urlPath, {
-    method : 'POST',
-    headers: {
-      'API-Key'     : cfg.krakenApiKey,
-      'API-Sign'    : sig,
-      'Content-Type': 'application/x-www-form-urlencoded'
-    },
-    body: postData
-  });
-
-  if(!r.ok) throw new Error(`HTTP ${r.status} — sjekk proxy og tilkobling`);
-  const d = await r.json();
   if(d.error && d.error.length > 0){
     const e = d.error[0];
     if(e.includes('Permission')) throw new Error('API-nøkkelen mangler "Create and modify orders"-tillatelse i Kraken → Sikkerhet → API');
@@ -3101,71 +3169,50 @@ async function krakenSign(urlPath, postData, privateKey){
 }
 
 async function connectKraken(){
-  const key    = (S('kraken-key')||{}).value    || cfg.krakenApiKey;
-  const secret = (S('kraken-secret')||{}).value || cfg.krakenSecret;
-  const proxy  = ((S('kraken-proxy')||{}).value || cfg.krakenProxy || '').replace(/\/$/, '');
-
-  if(!key)    { toast('Fyll inn Kraken API-nøkkel');    return; }
-  if(!secret) { toast('Fyll inn Kraken privat nøkkel'); return; }
-
-  if(!proxy){
-    // Ingen proxy satt — vis tydelig forklaring
-    const st  = S('kraken-status');
-    const dot = S('kraken-dot');
-    if(dot) dot.className = 'bdot';
-    if(st) {
-      st.className = 'conn-st';
-      st.textContent = '⚠️ Kraken krever proxy — se forklaring over';
-    }
-    toast('Kraken: Fyll inn en Proxy-URL for å omgå nettleserens CORS-blokkering');
-    return;
-  }
-
-  cfg.krakenApiKey = key;
-  cfg.krakenSecret = secret;
-  cfg.krakenProxy  = proxy;
-  saveAll();
-
   const dot = S('kraken-dot');
   const st  = S('kraken-status');
   if(dot) dot.className = 'bdot';
-  if(st)  { st.className = 'conn-st'; st.textContent = '🔄 Kobler til via proxy…'; }
+  if(st)  { st.className = 'conn-st'; st.textContent = '🔄 Kobler til…'; }
 
   try {
-    const nonce    = Date.now().toString();
-    const postData = 'nonce=' + nonce;
-    const urlPath  = '/0/private/Balance';
-
-    const sig = await krakenSign(urlPath, postData, secret);
-
-    // Bruk proxy-URL foran Kraken-stien
-    const targetUrl = proxy + urlPath;
-
-    const r = await fetch(targetUrl, {
-      method : 'POST',
-      headers: {
-        'API-Key'     : key,
-        'API-Sign'    : sig,
-        'Content-Type': 'application/x-www-form-urlencoded'
-      },
-      body: postData
-    });
-
-    if(!r.ok) throw new Error('HTTP ' + r.status + ' — sjekk at proxyen videresender til api.kraken.com');
-
-    const d = await r.json();
+    let d;
+    if(IS_SERVER){
+      // Server-modus: bruk Railway-backend (ingen CORS, ingen proxy nødvendig)
+      const r = await fetch('/api/kraken/balance', { method:'POST' });
+      d = await r.json();
+    } else {
+      // Lokal-modus: bruk proxy + nøkler fra innstillinger
+      const key    = (S('kraken-key')||{}).value    || cfg.krakenApiKey;
+      const secret = (S('kraken-secret')||{}).value || cfg.krakenSecret;
+      const proxy  = ((S('kraken-proxy')||{}).value || cfg.krakenProxy || '').replace(/\/$/, '');
+      if(!key)    { toast('Fyll inn Kraken API-nøkkel'); return; }
+      if(!secret) { toast('Fyll inn Kraken privat nøkkel'); return; }
+      if(!proxy)  { toast('Fyll inn Proxy-URL (Kraken blokkerer direkte nettleser-forespørsler)'); return; }
+      cfg.krakenApiKey = key; cfg.krakenSecret = secret; cfg.krakenProxy = proxy; saveAll();
+      const nonce    = Date.now().toString();
+      const postData = 'nonce=' + nonce;
+      const urlPath  = '/0/private/Balance';
+      const sig = await krakenSign(urlPath, postData, secret);
+      const r = await fetch(proxy + urlPath, {
+        method:'POST',
+        headers:{'API-Key':key,'API-Sign':sig,'Content-Type':'application/x-www-form-urlencoded'},
+        body: postData
+      });
+      if(!r.ok) throw new Error('HTTP ' + r.status);
+      d = await r.json();
+    }
 
     if(d.error && d.error.length > 0){
-      const errMsg = d.error[0];
-      if(errMsg.includes('Invalid key'))   throw new Error('Ugyldig API-nøkkel — sjekk at du kopierte riktig fra Kraken.');
-      if(errMsg.includes('Invalid nonce')) throw new Error('Nonce-feil — prøv igjen (skjer ved gjentatte raske kall).');
-      if(errMsg.includes('Permission'))    throw new Error('API-nøkkelen mangler tillatelse — aktiver «Query Funds» i Kraken → Sikkerhet → API.');
-      throw new Error(errMsg);
+      const e = d.error[0];
+      if(e.includes('Invalid key'))   throw new Error('Ugyldig API-nøkkel');
+      if(e.includes('Invalid nonce')) throw new Error('Nonce-feil — prøv igjen');
+      if(e.includes('Permission'))    throw new Error('Nøkkelen mangler «Query Funds»-tillatelse i Kraken');
+      throw new Error(e);
     }
 
     krakenConnected = true;
     if(dot) dot.className = 'bdot conn';
-    if(st)  { st.className = 'conn-st ok'; st.textContent = '✅ Tilkoblet via proxy'; }
+    if(st)  { st.className = 'conn-st ok'; st.textContent = IS_SERVER ? '✅ Tilkoblet (server)' : '✅ Tilkoblet (proxy)'; }
 
     const info = S('kraken-info');
     if(info) info.classList.remove('hidden');
@@ -3174,17 +3221,12 @@ async function connectKraken(){
     const balText    = balEntries.map(([k,v]) => `${k}: ${parseFloat(v).toFixed(6)}`).join(' · ') || '–';
     const kb = S('kraken-bal'); if(kb) kb.textContent = balText;
     const ka = S('kraken-avail'); if(ka) ka.textContent = balEntries.length + ' valutaer med saldo';
-
     toast('Kraken tilkoblet! ' + balEntries.length + ' valutaer funnet.');
 
   } catch(e) {
     if(dot) dot.className = 'bdot';
     if(st) { st.className = 'conn-st'; st.textContent = '❌ ' + e.message; }
-    if(e instanceof TypeError){
-      toast('Kraken: Klarte ikke nå proxyen på ' + proxy + ' — er den kjørende?');
-    } else {
-      toast('Kraken feil: ' + e.message);
-    }
+    toast('Kraken feil: ' + e.message);
     console.error('Kraken error:', e);
   }
 }

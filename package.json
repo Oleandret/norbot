@@ -2,8 +2,13 @@
   "name": "norbot",
   "version": "1.0.0",
   "description": "AI-drevet handelsanalyseplattform",
+  "main": "server.js",
   "scripts": {
-    "start": "npx serve . -l $PORT"
+    "start": "node server.js",
+    "dev": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2"
   },
   "engines": {
     "node": ">=18"
